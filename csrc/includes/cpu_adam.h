@@ -325,3 +325,221 @@ int ds_adam_step_plus_copy(int optimizer_id,
                            torch::Tensor& gpu_params);
 
 int destroy_adam_optimizer(int optimizer_id);
+
+/* Sonnet Optimizer */ 
+
+/* Sonnet Step */
+#define SNSTEP(SPAN)                                                         \
+    template <typename ds_params_percision_t, typename ds_state_precision_t> \
+    void SNStep_##SPAN(ds_params_percision_t* grads,                         \
+                     ds_state_precision_t* _exp_avg,                         \
+                     ds_state_precision_t* _exp_avg_sq,                      \
+                     size_t _param_size);
+
+class Sonnet_Optimizer{
+public:
+    Sonnet_Optimizer(float alpha = 1e-3,    // Unwanted parameter
+                    float betta1 = 0.9,
+                    float betta2 = 0.999,
+                    float eps = 1e-8,       // Unwanted parameter
+                    float weight_decay = 0, // Unwanted parameter 权重衰减
+                    bool adamw_mode = true) // 这里一个额外难题是 adamw_mode = false 时动量的更新需要权重参与
+            : _alpha(alpha),
+            _betta1(betta1),
+            _betta2(betta2),
+            _eps(eps),
+            _weight_decay(weight_decay),
+            _betta1_t(1.0),
+            _betta2_t(1.0),
+            _step(0),
+            _adamw_mode(adamw_mode)
+    {
+    }
+    ~Sonnet_Optimizer() {}
+
+#if defined(__AVX512__) or defined(__AVX256__)
+    template <int span, typename ds_params_percision_t, typename ds_state_precision_t>
+    void SNStep_AVX(size_t* rounded_size,
+                  ds_params_percision_t* grads,
+                  ds_state_precision_t* _exp_avg,
+                  ds_state_precision_t* _exp_avg_sq,
+                  size_t param_size);
+#endif
+    SNSTEP(1)
+    SNSTEP(4)
+    SNSTEP(8)
+    inline void SNIncrementStep(size_t step, float beta1, float beta2)
+    {
+        if (beta1 != _betta1 || beta2 != _betta2) {
+            _step = step;
+            _betta1 = beta1;
+            _betta2 = beta2;
+            _betta1_t = std::pow(_betta1, step);
+            _betta2_t = std::pow(_betta2, step);
+        } else {
+            _step++;
+            if (_step != step) {
+                _betta1_t = std::pow(_betta1, step);
+                _betta2_t = std::pow(_betta2, step);
+                _step = step;
+            } else {
+                _betta1_t *= _betta1;
+                _betta2_t *= _betta2;
+            }
+        }
+    }
+    // 配置优化器装，更新修正系数   // Unwanted function
+    inline void SNupdate_state(float lr, float epsilon, float weight_decay, bool bias_correction)
+    {
+        _alpha = lr;
+        _eps = epsilon;
+        _weight_decay = weight_decay;
+
+        _bias_correction1 = 1.0f;
+        _bias_correction2 = 1.0f;
+        if (bias_correction == 1) {
+            _bias_correction1 = 1 - _betta1_t;
+            _bias_correction2 = 1 / sqrt(1 - _betta2_t);
+        }
+    }
+private:
+    float _alpha;
+    float _betta1;
+    float _betta2;
+    float _eps;
+    float _weight_decay;
+
+    float _betta1_t;
+    float _betta2_t;
+    size_t _step;
+
+    float _bias_correction1;
+    float _bias_correction2;
+
+    bool _adamw_mode;
+};
+
+#if defined(__AVX512__) or defined(__AVX256__)
+template <int span, typename ds_params_percision_t, typename ds_state_precision_t>
+void Sonnet_Optimizer::SNStep_AVX(size_t* rounded_size,
+                              ds_params_percision_t* grads,
+                              ds_state_precision_t* _exp_avg,
+                              ds_state_precision_t* _exp_avg_sq,
+                              size_t _param_size)
+{
+#if !defined(__AVX512__)
+    if (std::is_same_v<ds_params_percision_t, c10::BFloat16> ||
+        std::is_same_v<ds_state_precision_t, c10::BFloat16>) {
+        return;
+    }
+#endif
+    size_t new_rounded_size = 0;
+
+    AVX_Data betta1_4;
+    betta1_4.data = SIMD_SET(_betta1);
+    AVX_Data betta2_4;
+    betta2_4.data = SIMD_SET(_betta2);
+
+    float betta1_minus1 = 1 - _betta1;
+    float betta2_minus1 = 1 - _betta2;
+    AVX_Data betta1_minus1_4;
+    betta1_minus1_4.data = SIMD_SET(betta1_minus1);
+    AVX_Data betta2_minus1_4;
+    betta2_minus1_4.data = SIMD_SET(betta2_minus1);
+
+    AVX_Data bias2_sqrt;
+    bias2_sqrt.data = SIMD_SET(_bias_correction2);
+
+    // AVX_Data eps_4;
+    // eps_4.data = SIMD_SET(_eps);
+
+    // float step_size = -1 * _alpha / _bias_correction1;
+    // AVX_Data step_size_4;
+    // step_size_4.data = SIMD_SET(step_size);
+
+    // float w_decay = -1 * _alpha * _weight_decay;
+    // AVX_Data weight_decay4;
+    // if (_weight_decay > 0)
+    //     weight_decay4.data = (_adamw_mode ? SIMD_SET(w_decay) : SIMD_SET(_weight_decay));
+
+    new_rounded_size = ROUND_DOWN(_param_size, SIMD_WIDTH * span);
+    for (size_t t = 0; t < new_rounded_size; t += TILE) {
+        size_t copy_size = TILE;
+        if ((t + TILE) > new_rounded_size) copy_size = new_rounded_size - t;
+        size_t offset = copy_size + t;
+#pragma omp parallel for 
+        // for(size_t i = t; i < offset; i += SIMD_WIDTH * span) {
+        //     AVX_Data grad_4[span];
+        //     simd_load<span>(grad_4, grads + i, true);
+
+        //     AVX_Data momentum_4[span];
+        //     simd_load<span>(momentum_4, _exp_avg + i, true);
+
+        //     AVX_Data variance_4[span];
+        //     simd_load<span>(variance_4, _exp_avg_sq + i, true);
+
+        //     simd_mul<span>(momentum_4, momentum_4, betta1_4);
+        //     simd_fma<span>(momentum_4, grad_4, betta1_minus1_4, momentum_4);
+
+        //     simd_mul<span>(variance_4, variance_4, betta2_4);
+        //     simd_mul<span>(grad_4, grad_4, grad_4);
+        //     simd_fma<span>(variance_4, grad_4, betta2_minus1_4, variance_4);
+
+        //     simd_store<span>(_exp_avg + i, momentum_4, true);
+        //     simd_store<span>(_exp_avg_sq + i, variance_4, true);
+        // }
+        for(size_t i = t; i < offset; i += SIMD_WIDTH * span) {
+            AVX_Data grad_4[span];
+            // 强制类型转换 grads 为 float*
+            simd_load<span>(grad_4, reinterpret_cast<float*>(grads + i), true);
+
+            AVX_Data momentum_4[span];
+            // 强制类型转换 _exp_avg 为 float*
+            simd_load<span>(momentum_4, reinterpret_cast<float*>(_exp_avg + i), true);
+
+            AVX_Data variance_4[span];
+            // 强制类型转换 _exp_avg_sq 为 float*
+            simd_load<span>(variance_4, reinterpret_cast<float*>(_exp_avg_sq + i), true);
+
+            // 进行一阶动量和二阶动量的更新
+            simd_mul<span>(momentum_4, momentum_4, betta1_4);
+            simd_fma<span>(momentum_4, grad_4, betta1_minus1_4, momentum_4);
+
+            simd_mul<span>(variance_4, variance_4, betta2_4);
+            simd_mul<span>(grad_4, grad_4, grad_4);
+            simd_fma<span>(variance_4, grad_4, betta2_minus1_4, variance_4);
+
+            // 强制类型转换存储回 exp_avg 和 exp_avg_sq
+            simd_store<span>(reinterpret_cast<float*>(_exp_avg + i), momentum_4, true);
+            simd_store<span>(reinterpret_cast<float*>(_exp_avg_sq + i), variance_4, true);
+        }
+    }
+    *rounded_size = new_rounded_size;
+}
+#endif
+
+//TODO Sonnet create_sonnet_adam_optimizer
+int create_sonnet_adam_optimizer(int optimizer_id,
+                                 float alpha = 1e-3,
+                                 float betta1 = 0.9,
+                                 float betta2 = 0.999,
+                                 float eps = 1e-8,
+                                 float weight_decay = 0,
+                                 bool adamw_mode = true,
+                                 bool should_log = false);
+
+//TODO Sonnet adam_step
+int sonnet_adam_step(int optimizer_id,
+                     size_t step,
+                     float lr,
+                     float beta1,
+                     float beta2,
+                     float epsilon,
+                     float weighe_decay,
+                     bool bias_correction,
+                     torch::Tensor& grads,
+                     torch::Tensor& exp_avg,
+                     torch::Tensor& exp_avg_sq);
+
+//TODO Sonnet destory_sonnet_adam_optimzier
+int destroy_sonnet_adam_optimizer(int optimizer_id);
