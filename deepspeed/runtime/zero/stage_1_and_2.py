@@ -320,7 +320,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 param.cpu_data = param.data.cpu()
                 param.data = torch.empty(1).to(param.device)
 
-            empty_cache()
+            empty_cache() # 清空 GPU 显存
             see_memory_usage(f"After moving param group {i} to CPU", force=False)
 
             # Reorder group parameters for load balancing of gradient partitioning during backward among ranks.
@@ -372,6 +372,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # set model bit16 weight to slices of flattened buffer
             self._update_model_bit16_weights(i)
 
+            # important !!!!
             # divide the flat weights into near equal partition equal to the data parallel degree
             # each process will compute on a different part of the partition
             data_parallel_partitions = self.get_data_parallel_partitions(self.bit16_groups_flat[i], i)
@@ -651,7 +652,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.grads_in_partition_offset = 0
 
     def initialize_optimizer_states(self):
-
+        
+        #TODO 分配zero初始化张量
         for i, group in enumerate(self.bit16_groups):
             single_grad_partition = torch.zeros(int(self.partition_size[i]),
                                                 dtype=self.single_partition_of_fp32_groups[i].dtype,
@@ -1257,6 +1259,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         dest_tensor.copy_(src_tensor, non_blocking=True)
         param.grad = None  #offload only
 
+    # 计算梯度 L2范数
     def complete_grad_norm_calculation_for_cpu_offload(self, params):
         total_norm = 0.0
         norm_type = 2.0
@@ -1823,13 +1826,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.timers(OPTIMIZER_GRADIENTS_TIMER).start()
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             if self.cpu_offload:
-                single_grad_partition = self.single_partition_of_fp32_groups[i].grad
+                
+                # 梯度放缩和裁剪
+                single_grad_partition = self.single_partition_of_fp32_groups[i].grad # i 分区的张量
                 self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
                 self.timers(OPTIMIZER_GRADIENTS_TIMER).stop()
                 self.timers(OPTIMIZER_STEP_TIMER).start()
-                self._optimizer_step(i)
 
+                # TODO important
+                self._optimizer_step(i)
+                
+                # TODO 权重同步
                 # Disabled, this is not currently working
                 #from deepspeed.ops.adam import DeepSpeedCPUAdam
                 #if not (type(self.optimizer) == DeepSpeedCPUAdam and self.dtype == torch.half):
@@ -1838,6 +1846,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 #    bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
+                # 将32位主权重拷贝到对应的16位参数
                 bit16_partitions[partition_id].data.copy_(fp32_partition.data)
 
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
@@ -1879,6 +1888,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
 
+        # TODO ALL-GATHER WEIGTH UPDATE
         see_memory_usage('After optimizer before all-gather')
         if self.cpu_offload:
             self.reset_cpu_buffers()

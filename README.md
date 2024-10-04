@@ -24,3 +24,22 @@ update
 some question:
   param_group need optimize
 
+## 10.4
+
+update 
+
+/deepspeed/runtime/engine.py
+/deepspeed/runtime/zero/stage1_and_stage2.py update
+
+optimizer congfigure in engine
+
+```
+
+if has_optimizer:
+  self._configure_optimizer(optimizer, model_parameters)
+  self._configure_lr_scheduler(lr_scheduler)
+  self._report_progress(0)
+
+  _configure_optimizer(optimizer, model_parameters)
+
+```

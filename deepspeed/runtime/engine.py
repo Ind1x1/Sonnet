@@ -288,6 +288,7 @@ class DeepSpeedEngine(Module):
         else:
             self.training_dataloader = None
 
+        #TODO 配置优化器
         # Configure optimizer and scheduler
         self.optimizer = None
         self.basic_optimizer = None
@@ -304,6 +305,7 @@ class DeepSpeedEngine(Module):
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
 
+        #TODO 优化器配置
         if has_optimizer:
             self._configure_optimizer(optimizer, model_parameters)
             self._configure_lr_scheduler(lr_scheduler)
@@ -1236,6 +1238,7 @@ class DeepSpeedEngine(Module):
         basic_optimizer.param_groups[:] = [pg for pg in basic_optimizer.param_groups if len(pg["params"]) != 0]
         log_dist("Removing param_group that has no 'params' in the basic Optimizer", ranks=[0])
 
+        #TODO 检查重复参数
         self._check_for_duplicates(basic_optimizer)
 
         self.basic_optimizer = basic_optimizer
@@ -1264,7 +1267,16 @@ class DeepSpeedEngine(Module):
         self.compression_scheduler = self._configure_compression_scheduler()
         self.quantizer = self._configure_quantization()
 
+    #TODO 初始化optimizer 
     def _configure_basic_optimizer(self, model_parameters):
+
+        # TODO 优化器参数
+        # optimizer_parameters = {
+        #     'lr': 0.001,  # 学习率
+        #     'weight_decay': 0.01,  # 权重衰减
+        #     'betas': (0.9, 0.999),  # Adam 优化器的 beta 参数
+        #     'eps': 1e-8  # Adam 优化器的 epsilon 参数
+        # }
         optimizer_parameters = self.optimizer_params()
         if optimizer_parameters is None:
             optimizer_parameters = {}
@@ -1472,6 +1484,8 @@ class DeepSpeedEngine(Module):
 
         return optimizer
 
+
+    #TODO 配置 zero优化器参数
     def _configure_zero_optimizer(self, optimizer):
         zero_stage = self.zero_optimization_stage()
 
@@ -2154,6 +2168,7 @@ class DeepSpeedEngine(Module):
                     and self.quantizer.any_precision_switch()):
                 self._take_model_step(lr_kwargs, self.block_eigenvalue)
             else:
+                #TODO UPDATE
                 self._take_model_step(lr_kwargs)
 
             report_progress = self.global_rank == 0 if self.global_rank else True

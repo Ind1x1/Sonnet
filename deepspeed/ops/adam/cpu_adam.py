@@ -192,24 +192,25 @@ class SonnetCPUAdam(torch.optim.Optimizer):
                  lr=1e-3,
                  bias_correction=True,
                  betas=(0.9,0.999),
-                 eps=1e-8
+                 eps=1e-8,
                  weight_decay=0,
                  amsgrad=False,
                  adamw_mode=True,
                  fp32_optimizer_states=True,
                  ):
-    """
-    """
+        """ SonnetCPUAdam
+        SonnetCPUAdam
+        """
     
-    default_args = dict(lr=lr,
-                        betas=betas,
-                        eps=eps,
-                        weight_decay=weight_decay,
-                        bias_correction=bias_correction,
-                        amsgrad=amsgrad)
-    super(SonnetCPUAdam,self).__init__(model_params,default_args)
+        default_args = dict(lr=lr,
+                            betas=betas,
+                            eps=eps,
+                            weight_decay=weight_decay,
+                            bias_correction=bias_correction,
+                            amsgrad=amsgrad)
+        super(SonnetCPUAdam,self).__init__(model_params,default_args)
 
-    cpu_info = get_cpu_info()
+        cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
         if "amd" in self.cpu_vendor:
             for group_id, group in enumerate(self.param_groups):
@@ -221,14 +222,14 @@ class SonnetCPUAdam(torch.optim.Optimizer):
                     continue
                 break
 
-    self.opt_id = SonnetCPUAdam.optimizer_id
-    SonnetCPUAdam.optimizer_id = SonnetCPUAdam.optimizer_id + 1
-    self.adam_w_mode = adamw_mode
-    self.fp32_optimizer_states = fp32_optimizer_states
-    self.sn_opt_adam = SonnetCPUAdam().load()
-    
-    self.sn_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
-                                 should_log_le("info"))
+        self.opt_id = SonnetCPUAdam.optimizer_id
+        SonnetCPUAdam.optimizer_id = SonnetCPUAdam.optimizer_id + 1
+        self.adam_w_mode = adamw_mode
+        self.fp32_optimizer_states = fp32_optimizer_states
+        self.sn_opt_adam = SonnetCPUAdam().load()
+        
+        self.sn_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
+                                    should_log_le("info"))
 
     def __del__(self):
         # need to destroy the C++ object explicitly to avoid a memory leak when deepspeed.initialize
@@ -242,32 +243,32 @@ class SonnetCPUAdam(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None, fp16_param_groups=None):
-    """
-    """
-    # TODO SOME QUESTION
-    loss = None
-    if closure is not None:
-        with torch.enalbe_grad():
-            loss = closure()
-    
-    device = torch.device('cpu')
+        """
+        """
+        # TODO SOME QUESTION
+        loss = None
+        if closure is not None:
+            with torch.enalbe_grad():
+                loss = closure()
+        
+        device = torch.device('cpu')
 
-    if type(fp16_param_groups) is list:
-        if type(fp16_param_groups[0]) is not list:
-            fp16_param_groups = [fp16_param_groups]
-    elif fp16_param_groups is not None:
-            fp16_param_groups = [[fp16_param_groups]]
-    
-    for group_id, group in enumerate(self.param_groups):
-        for param_id, p in enumerate(group['params']):
+        if type(fp16_param_groups) is list:
+            if type(fp16_param_groups[0]) is not list:
+                fp16_param_groups = [fp16_param_groups]
+        elif fp16_param_groups is not None:
+                fp16_param_groups = [[fp16_param_groups]]
+        
+        for group_id, group in enumerate(self.param_groups):
+            for param_id, p in enumerate(group['params']):
 
-            if p.grad is None:
-                continue
-            
-            assert p.device == device, f"CPUAdam param is on {p.device} and must be 'cpu', make " \
-                    "sure you enabled 'offload_optimizer': 'cpu' in your ZeRO config."
+                if p.grad is None:
+                    continue
+                
+                assert p.device == device, f"CPUAdam param is on {p.device} and must be 'cpu', make " \
+                        "sure you enabled 'offload_optimizer': 'cpu' in your ZeRO config."
 
-            state = self.state[p]
+                state = self.state[p]
                 # State initialization
                 if len(state) == 0:
                     #print(f'group {group_id} param {param_id} = {p.numel()}')
@@ -287,7 +288,7 @@ class SonnetCPUAdam(torch.optim.Optimizer):
                 beta1, beta2 = group['betas']
 
                 self.sn_opt_adam.sonnet_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
-                                             group['weight_decay'], group['bias_correction'], p.grad.data,
-                                             state['exp_avg'], state['exp_avg_sq'])
-    
-    return loss
+                                                group['weight_decay'], group['bias_correction'], p.grad.data,
+                                                state['exp_avg'], state['exp_avg_sq'])
+        
+        return loss

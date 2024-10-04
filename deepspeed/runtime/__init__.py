@@ -10,3 +10,6 @@ class DeepSpeedOptimizer(object):
 
 class ZeROOptimizer(DeepSpeedOptimizer):
     pass
+
+class SonnetOptimizer(DeepSpeedOptimizer):
+    pass
