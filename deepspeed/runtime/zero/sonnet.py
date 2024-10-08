@@ -47,7 +47,10 @@ class SonnetCPUoptimizer(SonnetOptimizer):
     
     """
     def __init__(self,
+                 optimizer_parameters,
+                 model_parameters,
                  ):
-        
+        optimizer = DeepSpeedCPUAdam(model_parameters,
+                                     **optimizer_parameters,)
         
         

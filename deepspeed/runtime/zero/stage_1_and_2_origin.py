@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-# Sonnet Based
 
 import torch
 import os
@@ -11,15 +10,14 @@ from packaging import version as pkg_version
 from collections import OrderedDict
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
-from deepspeed.runtime import ZeROOptimizer,SonnetOptimizer
+from deepspeed.runtime import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank, get_global_norm, empty_cache, see_memory_usage,
                                      inf, is_model_parallel_parameter, align_dense_tensors, all_gather_dp_groups)
 
-from deepspeed.runtime.zero.sonnet import SonnetCPUoptimizer
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
-from deepspeed.ops.adam import DeepSpeedCPUAdam, SonnetCPUAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.git_version_info import version
@@ -106,7 +104,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  init_optimizer,
                  param_names,
                  timers,
-                 init_sonnetoptimizer=None,
                  static_loss_scale=1.0,
                  dynamic_loss_scale=False,
                  dynamic_loss_args=None,
@@ -273,9 +270,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # align nccl all-gather send buffers to 4-byte boundary
         self.nccl_start_alignment_factor = 2  # 4-byte alignment/sizeof(fp16) = 2
 
-        #TODO sonnet params cpu copy
-        self.sonnet_params = []
-
         assert (
             allgather_bucket_size % self.nccl_start_alignment_factor == 0
         ), f"allgather_bucket_size must be a multiple of nccl_start_alignment_factor, {self.nccl_start_alignment_factor} "
@@ -300,8 +294,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Use different parallel to do all_to_all_reduce related things
         # padding on each partition for alignment purposes
         self.groups_padding = []
-
-        # TODO self.parallel_partitioned_bit16_groups[i][partition_id]
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
@@ -415,13 +407,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.params_in_partition.append(params_in_partition)
             self.params_not_in_partition.append(params_not_in_partition)
             self.first_offset.append(first_offset)
-
-            if not init_sonnetoptimizer:
-                sonnet_params_not_in_partition = []
-                for param in params_not_in_partition:
-                    param_cpu_copy = param.data.cpu().clone()
-                    sonnet_params_not_in_partition.append(param_cpu_copy)
-            self.sonnet_params.append(sonnet_params_not_in_partition)
 
         self.reduce_bucket_size = int(reduce_bucket_size)
         self.use_multi_rank_bucket_allreduce = use_multi_rank_bucket_allreduce
@@ -555,16 +540,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
 
-        #TODO Sonnet opimizer init
-        if not init_sonnetoptimizer:
-            self.sonnet_FLAG = True
-            # self.sonnet_accmulated_grads_in_cpu = {}
-            # self.sonnet_something_dir1 = {}
-            # self.sonnet_temp_grad_buffer_for_cpu_offload = torch.zeros(largest_param_numel,
-            #                                                            device=self.device,
-            #                                                            dtype=self.dtype)
-            self.sonnetoptimizer = init_sonnetoptimizer
-        
     def destroy(self):
         for hook in self._grad_acc_hooks:
             hook.remove()
@@ -1758,16 +1733,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             p.grad = None  # in step
             p.grad_accum = None
 
-    def sonnet_grad_to_cpu(param_list, param_list_cpu):
-        
-        assert len(param_list) == (param_list_cpu), "Wrong len of param list"
-
-        for gpu_p, cpu_p in zip(param_list, param_list_cpu):
-            if gpu_p.grad is not None:
-                cpu_p.grad = gpu_p.detach().cpu().clone()
-        else:
-            cpu_p.grad = None
-
     def reset_cpu_buffers(self):
         self.norm_for_param_grads = {}
         self.local_overflow = False
@@ -1821,17 +1786,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.optimizer.step()
         self.optimizer.param_groups = original_param_groups
 
-    def _sonnet_optimizer_step(self, group_no):
-        original_param_groups = self.sonnetoptimizer.param_groups
-        self.sonnetoptimizer.param_groups = [original_param_groups[group_no]]
-        self.sonnetoptimizer.step()
-        self.sonnetoptimizer.param_groups = original_param_groups
-
-    def _sonnet_run(self,group_no,scaled_global_grad_norm):
-        sonnet_single_grad_partition = self.sonnet_params[group_no].grad
-        self.unscale_and_clip_grads([sonnet_single_grad_partition],scaled_global_grad_norm)
-        self._sonnet_optimizer_step(group_no)
-
     def step(self, closure=None):
         """
         Not supporting closure.
@@ -1863,8 +1817,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Step 1:- Calculate gradient norm using bit-16 grads
         see_memory_usage('Before norm calculation')
-        scaled_global_grad_norm = self.scaled_global_norm() # averaged_gradients 获得值
-        self._global_grad_norm = scaled_global_grad_norm / prev_scale # 梯度爆炸/计算全局梯度范数
+        scaled_global_grad_norm = self.scaled_global_norm()
+        self._global_grad_norm = scaled_global_grad_norm / prev_scale
         see_memory_usage('After norm before optimizer')
 
         # Step 2:- run optimizer and upscaling simultaneously
@@ -1897,18 +1851,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
             else:
-                #TODO
-                if not self.sonnet_FLAG:
-                    self.sonnet_grad_to_cpu(self.params_not_in_partition[i], self.sonnet_params[i])     
                 # free gradients for all the parameters that are not updated by this process(ZeRO stage2)
-                # self.params_not_in_partition 是我们需要更新的部分，test dp=2
                 self.free_grad_in_param_list(self.params_not_in_partition[i])
 
-                #TODO 展平 张量
                 # create a flat gradients for parameters updated by this process
                 # If we are last partition, ensure we have same size grads and partition size, if not pad with zero tensors
-                if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1: #TODO 最后一个分区
-                    # grad_partition 只包含了本GPU所管理的参数的梯度
+                if partition_id == dist.get_world_size(group=self.real_dp_process_group[i]) - 1:
                     single_grad_partition = self.flatten_dense_tensors_aligned(
                         self.averaged_gradients[i],
                         int(self.partition_size[i])).to(self.single_partition_of_fp32_groups[i].dtype)
@@ -1919,23 +1867,19 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     "averaged gradients have different number of elements that partition size {} {} {} {}".format(
                         single_grad_partition.numel(), self.partition_size[i], i, partition_id)
 
-
                 self.single_partition_of_fp32_groups[i].grad = single_grad_partition
                 # release all the gradient since we have already created a necessary copy in dp_grad_partition(ZeRO stage2)
                 self.free_grad_in_param_list(self.params_in_partition[i])
 
                 self.averaged_gradients[i] = None
 
-                self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)  #TODO 梯度的反缩放
+                self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
                 self.timers(OPTIMIZER_GRADIENTS_TIMER).stop()
 
-                # update！
                 # Step 3:- run the optimizer if no offloading
                 self.timers(OPTIMIZER_STEP_TIMER).start()
                 self._optimizer_step(i)
-                
-                # TODO update
                 # Step 4:- get rid of the fp32 gradients. Not needed anymore
                 self.single_partition_of_fp32_groups[i].grad = None
                 del single_grad_partition
